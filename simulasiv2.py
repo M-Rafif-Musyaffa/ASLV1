@@ -1,10 +1,10 @@
-import cv2
-import mediapipe as mp
 import numpy as np
 import random
-import time
 import streamlit as st
+import streamlit_webrtc as webrtc
 import tensorflow as tf
+import mediapipe as mp
+from PIL import Image
 
 # Load the TFLite model for ASL letter detection
 interpreter = tf.lite.Interpreter(model_path="model_asl.tflite")
@@ -16,10 +16,29 @@ output_details = interpreter.get_output_details()
 
 # Set up MediaPipe for hand detection
 mp_hands = mp.solutions.hands
-mp_drawing = mp.solutions.drawing_utils
-hands = mp_hands.Hands(
-    static_image_mode=True, max_num_hands=1, min_detection_confidence=0.7
-)
+hands = mp_hands.Hands(static_image_mode=True, max_num_hands=1, min_detection_confidence=0.7)
+
+# Function to process the image and get hand landmarks
+def process_image(image):
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    results = hands.process(image_rgb)
+    
+    if results.multi_hand_landmarks:
+        landmarks = []
+        for hand_landmarks in results.multi_hand_landmarks:
+            for landmark in hand_landmarks.landmark:
+                landmarks.append((landmark.x, landmark.y, landmark.z))
+        return np.array(landmarks).flatten()
+    else:
+        return np.zeros(63)  # Return a zero array if no hands are detected
+
+# Function to predict ASL using the TFLite model
+def predict_asl(data):
+    data = np.array(data, dtype=np.float32).reshape(1, 63)
+    interpreter.set_tensor(input_details[0]["index"], data)
+    interpreter.invoke()
+    prediction = interpreter.get_tensor(output_details[0]["index"])
+    return np.argmax(prediction)
 
 # Streamlit sidebar
 st.sidebar.title("Navigation")
@@ -29,203 +48,46 @@ page = st.sidebar.radio("Go to", ["ASL Game & Simulation", "About ASL", "Creator
 if page == "ASL Game & Simulation":
     st.title("ASL Practice & Detection")
     st.write("Select an option to start:")
-
-    # Tombol untuk memilih mode
+    
     mode = st.radio("Choose Mode:", ["Mini-Game", "ASL Simulation"])
-
-    # Webcam placeholder
-    frame_placeholder = st.empty()
-    target_letter = st.empty()
-    score_text = st.empty()
-
-    # Inisialisasi kamera
-    cap = cv2.VideoCapture(0)
-
-    # Fungsi untuk memproses gambar
-    def image_processed(hand_img):
-        img_rgb = cv2.cvtColor(hand_img, cv2.COLOR_BGR2RGB)
-        img_flip = cv2.flip(img_rgb, 1)
-        output = hands.process(img_flip)
-        try:
-            data = output.multi_hand_landmarks[0]
-            data = str(data).strip().split("\n")
-            garbage = ["landmark {", "  visibility: 0.0", "  presence: 0.0", "}"]
-            clean = [float(i.strip()[2:]) for i in data if i not in garbage]
-            return clean
-        except:
-            return np.zeros([1, 63], dtype=int)[0]
-
-    # Fungsi untuk prediksi menggunakan model TFLite
-    def predict_asl_tflite(data):
-        # Konversi data ke bentuk numpy array dan reshape
-        data = np.array(data, dtype=np.float32).reshape(1, 63)
-        # Set input tensor
-        interpreter.set_tensor(input_details[0]["index"], data)
-        # Jalankan inferensi
-        interpreter.invoke()
-        # Ambil output tensor
-        prediction = interpreter.get_tensor(output_details[0]["index"])
-        # Mendapatkan kelas dengan probabilitas tertinggi
-        predicted_label = np.argmax(prediction)
-        return predicted_label
-
-    # Mode Mini-Game
+    
+    # Webcam Placeholder
     if mode == "Mini-Game":
         st.subheader("Mini-Game: Match the ASL letter")
         letters = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
         current_letter = random.choice(letters)
         score = 0
-
+        
         # Display target letter and score
+        target_letter = st.empty()
+        score_display = st.empty()
         target_letter.write(f"Target Letter: **{current_letter}**")
-
-        correct_display_time = 0  # Waktu untuk menampilkan pesan "Correct!"
-
-        # Loop untuk Mini-Game
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                st.write("Unable to access the camera.")
-                break
-
-            # Prediksi huruf dari webcam
-            data = image_processed(frame)
-            y_pred = predict_asl_tflite(data)
-
-            # Konversi indeks ke huruf
-            detected_letter = letters[y_pred]
-
-            # Periksa apakah huruf yang terdeteksi cocok
+        
+        def video_frame_callback(frame):
+            img = frame.to_ndarray(format="bgr24")
+            landmarks = process_image(img)
+            predicted_label = predict_asl(landmarks)
+            detected_letter = letters[predicted_label]
+            
             if detected_letter == current_letter:
                 score += 1
-                score_text.write(f"**Score**: {score}")
                 current_letter = random.choice(letters)
                 target_letter.write(f"Target Letter: **{current_letter}**")
-                correct_display_time = time.time()  # Simpan waktu ketika tebakan benar
+            
+            return frame
+        
+        webrtc_streamer(key="example", video_frame_callback=video_frame_callback)
 
-            # Tampilkan pesan "Correct!" selama 1 detik setelah tebakan benar
-            if time.time() - correct_display_time < 1:
-                cv2.putText(
-                    frame,
-                    "Correct!",
-                    (50, 100),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    2,
-                    (0, 255, 0),
-                    3,
-                )
-
-            # Tampilkan webcam feed dan hasil
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = hands.process(rgb_frame)
-            if results.multi_hand_landmarks:
-                for landmarks in results.multi_hand_landmarks:
-                    mp_drawing.draw_landmarks(
-                        frame,
-                        landmarks,
-                        mp_hands.HAND_CONNECTIONS,
-                        mp_drawing.DrawingSpec(
-                            color=(0, 255, 0), thickness=2, circle_radius=2
-                        ),
-                        mp_drawing.DrawingSpec(
-                            color=(255, 255, 255), thickness=2, circle_radius=0
-                        ),
-                    )
-
-            # Tampilkan frame di Streamlit
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frame_placeholder.image(rgb_frame)
-
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
-
-    # Mode Simulasi Deteksi
+    # Mode ASL Simulation
     elif mode == "ASL Simulation":
-        st.subheader("ASL Detection Simulation")
-
-        # Loop untuk simulasi deteksi ASL
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                st.write("Unable to access the camera.")
-                break
-
-            # Proses dan prediksi huruf
-            data = image_processed(frame)
-            y_pred = predict_asl_tflite(data)
-            detected_letter = letters[y_pred]
-
-            # Tampilkan huruf prediksi pada frame
-            cv2.rectangle(frame, (0, 0), (230, 70), (245, 117, 16), -1)
-            cv2.putText(
-                frame,
-                detected_letter,
-                (10, 50),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1.5,
-                (255, 255, 255),
-                2,
-            )
-
-            # Gambar landmark tangan
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = hands.process(rgb_frame)
-            if results.multi_hand_landmarks:
-                for landmarks in results.multi_hand_landmarks:
-                    mp_drawing.draw_landmarks(
-                        frame,
-                        landmarks,
-                        mp_hands.HAND_CONNECTIONS,
-                        mp_drawing.DrawingSpec(
-                            color=(0, 255, 0), thickness=2, circle_radius=2
-                        ),
-                        mp_drawing.DrawingSpec(
-                            color=(255, 255, 255), thickness=2, circle_radius=0
-                        ),
-                    )
-
-            # Tampilkan hasil kamera pada Streamlit
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frame_placeholder.image(rgb_frame)
-
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
-
-    cap.release()
-    cv2.destroyAllWindows()
+        st.write("This mode simulates ASL detection.")
 
 # Halaman Tentang ASL
 elif page == "About ASL":
     st.title("About American Sign Language (ASL)")
-    st.write(
-        "American Sign Language (ASL) is a visual language that serves as the primary language for the Deaf community in the United States and parts of Canada."
-    )
-    st.image("asl-alphabet.jpg", caption="Example of ASL Alphabet")
+    st.write("American Sign Language (ASL) is a visual language...")
 
 # Halaman Pembuat
 elif page == "Creators":
     st.title("Creators")
     st.write("This application was created by a team of dedicated developers.")
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.image("p1.png", width=150)
-        st.write("**Name**: Creator 1")
-        st.write("**NIM**: 123456789")
-        st.write("**Class**: Class A")
-
-        st.image("p2.png", width=150)
-        st.write("**Name**: Creator 2")
-        st.write("**NIM**: 987654321")
-        st.write("**Class**: Class B")
-
-    with col2:
-        st.image("p3.png", width=150)
-        st.write("**Name**: Creator 3")
-        st.write("**NIM**: 112233445")
-        st.write("**Class**: Class C")
-
-        st.image("p4.png", width=150)
-        st.write("**Name**: Creator 4")
-        st.write("**NIM**: 556677889")
-        st.write("**Class**: Class D")

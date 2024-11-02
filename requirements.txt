@@ -1,5 +1,3 @@
-opencv-python-headless
+streamlit-webrtc
 mediapipe
-numpy
-streamlit
 tensorflow
